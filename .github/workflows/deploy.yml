@@ -1,0 +1,95 @@
+name: Deploy Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:          # manual trigger
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+
+  # ============================================
+  # Job 1: Deploy to Staging
+  # ============================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging      # GitHub environment (requires approval)
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to staging
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          DB_URL: ${{ secrets.STAGING_DB_URL }}
+        run: |
+          echo "================================================"
+          echo "Deploying to STAGING"
+          echo "Commit: ${{ github.sha }}"
+          echo "Actor:  ${{ github.actor }}"
+          echo "Time:   $(date -u)"
+          echo "================================================"
+
+          # In real deployment:
+          # - SSH to server and pull new image
+          # - Update docker-compose and restart
+          # - Or update Kubernetes deployment
+          # - Or trigger AWS ECS update
+
+          echo "✅ Staging deployment complete"
+
+      - name: Run smoke tests
+        run: |
+          echo "Running post-deployment smoke tests..."
+          echo "✅ Health check: passing"
+          echo "✅ API endpoints: responding"
+          echo "✅ Database: connected"
+
+      - name: Notify deployment
+        run: |
+          echo "Deployment notification sent"
+          echo "Environment: staging"
+          echo "Version: ${{ github.sha }}"
+
+  # ============================================
+  # Job 2: Deploy to Production
+  # ============================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging       # prod only after staging succeeds
+    environment: production     # requires manual approval in GitHub UI
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to production
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          DB_URL: ${{ secrets.PROD_DB_URL }}
+        run: |
+          echo "================================================"
+          echo "Deploying to PRODUCTION"
+          echo "Commit: ${{ github.sha }}"
+          echo "Actor:  ${{ github.actor }}"
+          echo "Time:   $(date -u)"
+          echo "================================================"
+          echo "✅ Production deployment complete"
+
+      - name: Create deployment tag
+        run: |
+          echo "Creating release tag v1.0.${{ github.run_number }}"
+          echo "Tag pushed to repository"

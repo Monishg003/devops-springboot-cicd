@@ -1,0 +1,6 @@
+target/
+*.jar
+.env
+*.log
+.mvn/
+*.class

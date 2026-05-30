@@ -1,0 +1,42 @@
+name: Matrix Build
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 6 * * 1'    # every Monday at 6am
+
+jobs:
+
+  compatibility-test:
+    name: Test on Java ${{ matrix.java }}
+    runs-on: ${{ matrix.os }}
+
+    # Matrix — runs all combinations
+    strategy:
+      matrix:
+        java: ['17', '21']
+        os: ['ubuntu-latest']
+      fail-fast: false      # don't cancel other jobs if one fails
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run tests on Java ${{ matrix.java }}
+        run: |
+          echo "Testing on Java ${{ matrix.java }}"
+          mvn test -q
+          echo "✅ Tests passed on Java ${{ matrix.java }}"
+
+      - name: Build JAR on Java ${{ matrix.java }}
+        run: |
+          mvn clean package -DskipTests -q
+          echo "JAR size: $(du -sh target/*.jar | cut -f1)"
