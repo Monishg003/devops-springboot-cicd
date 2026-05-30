@@ -1,0 +1,84 @@
+name: lint check and summary
+
+on:
+  pull_request:
+    branches: [ main ]
+
+env:
+  JAVA_VERSION: '17'
+
+jobs:
+
+  lint-check:
+    name: Lint Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check package declarations
+        run: |
+          echo "Checking Java files for package declarations..."
+
+          FAILED=0
+
+          for file in $(find src -name "*.java"); do
+            if ! grep -q "^package " "$file"; then
+              echo "❌ Missing package declaration: $file"
+              FAILED=1
+            fi
+          done
+
+          if [ $FAILED -eq 1 ]; then
+            echo "Lint check failed!"
+            exit 1
+          fi
+
+          echo "✅ All files have package declaration"
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Run unit tests
+        run: mvn test -q
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: target/surefire-reports/
+          retention-days: 7
+
+  summary:
+    name: Summary
+    runs-on: ubuntu-latest
+    needs: [lint-check, test]
+    if: always()
+
+    steps:
+      - name: Summary Results
+        run: |
+          echo "================================================"
+          echo "Summary Report"
+          echo "Generated: $(date -u)"
+          echo "================================================"
+          echo "PR Number:  ${{ github.event.pull_request.number }}"
+          echo "Author:     ${{ github.actor }}"
+          echo "Branch:     ${{ github.head_ref }}"
+          echo "Commit:     ${{ github.sha }}"
+          echo "Lint:       ${{ needs.lint-check.result }}"
+          echo "Tests:      ${{ needs.test.result }}"
