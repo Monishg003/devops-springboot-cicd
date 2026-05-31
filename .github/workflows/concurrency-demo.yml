@@ -1,0 +1,34 @@
+name: Concurrency Control Demo
+
+on:
+  push:
+    branches: [main]
+
+# Global concurrency — affects entire workflow
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+  # If push 1 is running and push 2 arrives:
+  # push 1 is CANCELLED, push 2 starts
+  # ensures latest code always deploys
+
+jobs:
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    # Job-level concurrency
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+      # false = queue instead of cancel
+      # deploy-1 finishes THEN deploy-2 starts
+      # prevents race conditions on production
+
+    steps:
+      - name: Simulate deployment
+        run: |
+          echo "Deploying..."
+          sleep 5
+          echo "✅ Deploy complete"

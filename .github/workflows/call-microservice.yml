@@ -1,0 +1,36 @@
+name: Call Microservice Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Prevent multiple deploys running at once
+concurrency:
+  group: payment-service-${{ github.ref }}
+  cancel-in-progress: true    # cancel old run if new push arrives
+
+jobs:
+
+  # ---- Call reusable build workflow ----
+  build-staging:
+    name: Build for Staging
+    uses: ./.github/workflows/reusable/microservice-ci.yml
+    with:
+      java-version: '17'
+      service-name: 'payment-service'
+      deploy-env: 'staging'
+
+  health-check:
+    name: Build using composite actions
+    runs-on: ubuntu-latest
+    steps:
+      - name:  Composite action
+        uses: ./.github/actions/health-check
+        with: 
+          url: "http://localhost:8080"
+          retries: '3'
+     -  name: Print status
+        run: |
+         echo "Health Status: ${{ steps.health.outputs.status }}"

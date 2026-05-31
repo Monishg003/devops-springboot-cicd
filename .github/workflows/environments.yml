@@ -1,0 +1,44 @@
+name: Environment Protection Demo
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    environment: development    # no protection — auto deploys
+    steps:
+      - name: Deploy to dev
+        run: |
+          echo "Deploying to DEVELOPMENT"
+          echo "No approval needed — auto deploys"
+          echo "✅ Dev deployment complete"
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    environment: staging         # may require approval
+    steps:
+      - name: Deploy to staging
+        run: |
+          echo "Deploying to STAGING"
+          echo "✅ Staging deployment complete"
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production      # REQUIRES manual approval in GitHub UI
+    # In GitHub → Settings → Environments → production
+    # Add required reviewers
+    # Pipeline PAUSES here until someone approves
+    steps:
+      - name: Deploy to production
+        run: |
+          echo "Deploying to PRODUCTION"
+          echo "This ran only after manual approval!"
+          echo "✅ Production deployment complete"

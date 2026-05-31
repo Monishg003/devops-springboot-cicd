@@ -1,0 +1,43 @@
+name: Use Composite Actions
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+
+  build-with-composite:
+    name: Build Using Custom Actions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Use our composite action
+      - name: Setup Application
+        id: setup
+        uses: ./.github/actions/setup-app
+        with:
+          java-version: '17'
+          validate: 'true'
+
+      - name: Show setup output
+        run: |
+          echo "Java used: ${{ steps.setup.outputs.java-version-used }}"
+
+      - name: Run tests
+        run: mvn test -q
+
+      - name: Build
+        run: mvn package -DskipTests -q
+
+      # Use deploy composite action
+      - name: Deploy
+        uses: ./.github/actions/deploy-ssh
+        with:
+          host: 'staging.mycompany.com'
+          username: 'ubuntu'
+          ssh-key: ${{ secrets.SSH_KEY }}
+          image: 'ghcr.io/monishg003/devops-app:latest'
+          environment: 'staging'

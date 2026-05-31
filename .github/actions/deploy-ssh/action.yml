@@ -1,0 +1,55 @@
+name: 'SSH Deploy'
+description: 'Deploys application to server via SSH'
+author: 'Monish G'
+
+inputs:
+  host:
+    description: 'Server hostname or IP'
+    required: true
+  username:
+    description: 'SSH username'
+    required: false
+    default: 'ubuntu'
+  ssh-key:
+    description: 'SSH private key'
+    required: true
+  image:
+    description: 'Docker image to deploy'
+    required: true
+  environment:
+    description: 'Target environment'
+    required: true
+
+outputs:
+  deploy-status:
+    description: 'Deployment status'
+    value: ${{ steps.deploy.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+
+    - name: Validate inputs
+      shell: bash
+      run: |
+        echo "Deploying to: ${{ inputs.environment }}"
+        echo "Server: ${{ inputs.host }}"
+        echo "Image: ${{ inputs.image }}"
+
+    - name: Deploy via SSH
+      id: deploy
+      shell: bash
+      run: |
+        # In real deployment — uses SSH key to connect
+        # Here we simulate it
+        echo "Connecting to ${{ inputs.host }}..."
+        echo "Pulling image: ${{ inputs.image }}"
+        echo "Restarting service..."
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "✅ Deployment to ${{ inputs.environment }} complete"
+
+    - name: Verify deployment
+      shell: bash
+      run: |
+        echo "Running post-deploy health check..."
+        echo "✅ Health check passed"

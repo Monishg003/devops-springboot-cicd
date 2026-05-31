@@ -1,0 +1,51 @@
+name: 'Health Check'
+author: 'Monish G'
+
+inputs:
+  url:
+    description: 'Application URL'
+    required: true
+
+  retries:
+    description: 'Number of retry attempts'
+    required: false
+    default: '3'
+
+outputs:
+  status:
+    description: 'healthy or unhealthy'
+    value: ${{ steps.health.outputs.status }}
+
+runs:
+  using: 'composite'
+
+  steps:
+    - name: Check Application Health
+      id: health
+      shell: bash
+      run: |
+        URL="${{ inputs.url }}"
+        RETRIES="${{ inputs.retries }}"
+
+        echo "Checking health of: $URL"
+        echo "Retries configured: $RETRIES"
+
+        STATUS="unhealthy"
+
+        for ((i=1; i<=RETRIES; i++))
+        do
+          echo "Attempt $i of $RETRIES"
+
+          if curl -f -s "$URL" > /dev/null; then
+            STATUS="healthy"
+            echo "✅ Application is healthy"
+            break
+          fi
+
+          echo "❌ Health check failed"
+          sleep 5
+        done
+
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+        echo "Final Status: $STATUS"

@@ -1,0 +1,97 @@
+name: Outputs and Dependencies Demo
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+
+  # Job 1 — produces outputs
+  get-version:
+    name: Get Version Info
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      should-deploy: ${{ steps.check.outputs.deploy }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION="1.0.${{ github.run_number }}"
+          echo "value=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Check if should deploy
+        id: check
+        run: |
+          # Only deploy if on main branch
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+            echo "Will deploy: YES"
+          else
+            echo "deploy=false" >> $GITHUB_OUTPUT
+            echo "Will deploy: NO"
+          fi
+
+  # Job 2 — uses Job 1 outputs
+  build:
+    name: Build Version ${{ needs.get-version.outputs.version }}
+    runs-on: ubuntu-latest
+    needs: get-version
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build with version
+        run: |
+          VERSION=${{ needs.get-version.outputs.version }}
+          echo "Building version: $VERSION"
+          mvn clean package -DskipTests -q \
+            -Drevision=$VERSION
+          echo "✅ Built version $VERSION"
+
+  # Job 3 — conditional on output value
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [get-version, build]
+    # Only deploy if get-version said yes
+    if: needs.get-version.outputs.should-deploy == 'true'
+
+    steps:
+      - name: Deploy version
+        run: |
+          echo "Deploying version: ${{ needs.get-version.outputs.version }}"
+          echo "✅ Deployed!"
+
+  # Job 4 — always runs, shows final status
+  notify:
+    name: Notify Team
+    runs-on: ubuntu-latest
+    needs: [get-version, build, deploy]
+    if: always()
+
+    steps:
+      - name: Send notification
+        run: |
+          echo "================================================"
+          echo "Pipeline Complete"
+          echo "Version:  ${{ needs.get-version.outputs.version }}"
+          echo "Build:    ${{ needs.build.result }}"
+          echo "Deploy:   ${{ needs.deploy.result }}"
+          echo "================================================"
+
+          # In production — send to Slack, Teams, PagerDuty
+          # curl -X POST $SLACK_WEBHOOK -d '{"text":"Deployed!"}'

@@ -1,0 +1,88 @@
+name: Reusable — Microservice
+
+# This is what makes it reusable
+on:
+  workflow_call:              # called by other workflows
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        required: false
+        type: string
+        default: '17'
+      deploy-env:
+        description: 'Target environment'
+        required: false
+        type: string
+        default: 'staging'
+      service-name:
+        description: 'Service name'
+        required: true
+        type: string
+
+jobs:
+
+  test:
+    name: Test (Java ${{ inputs.java-version }})
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.run-tests.outcome }}
+
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run unit tests
+        id: run-tests
+        run: |
+          echo "Running tests for ${{ inputs.service-name }}..."
+          mvn test -q
+          echo "✅ Tests passed"
+
+  build:
+    name: Build JAR
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      status: ${{ steps.build-jar.outcome }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build JAR
+        id: build-jar
+        run: |
+          mvn clean package -DskipTests -q
+          echo "✅ Build passed"
+
+
+  report:
+    name: Report Summary
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: always()
+
+    steps:
+
+      - name: Report Summary
+        run: |
+          echo "Service: ${{ inputs.service-name }}"
+          echo "JAVA: ${{ inputs.java-version }}"
+          echo "ENVIRONMENT: ${{ inputs.deploy-env }}"
+          echo "Test Result: ${{ needs.test.outputs.status}}"
+          echo "Build Result: ${{ needs.build.outputs.status}}"

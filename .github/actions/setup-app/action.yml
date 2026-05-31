@@ -1,0 +1,50 @@
+name: 'Setup Application'
+description: 'Sets up Java, Maven cache, and validates project'
+author: 'Monish G'
+
+# Inputs this action accepts
+inputs:
+  java-version:
+    description: 'Java version'
+    required: false
+    default: '17'
+  validate:
+    description: 'Run Maven validate'
+    required: false
+    default: 'true'
+
+# Outputs this action produces
+outputs:
+  java-version-used:
+    description: 'Java version that was set up'
+    value: ${{ steps.setup.outputs.java-version }}
+
+runs:
+  using: 'composite'   # composite = multiple steps
+  steps:
+
+    - name: Setup Java
+      id: setup
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'temurin'
+        cache: 'maven'
+
+    - name: Validate Maven project
+      if: inputs.validate == 'true'
+      shell: bash
+      run: |
+        echo "Validating Maven project..."
+        mvn validate -q
+        echo "✅ Project valid"
+
+    - name: Print setup info
+      shell: bash
+      run: |
+        echo "================================================"
+        echo " Setup Complete"
+        echo " Java version: ${{ inputs.java-version }}"
+        echo " Maven version: $(mvn --version | head -1)"
+        echo " Working dir: $(pwd)"
+        echo "================================================"

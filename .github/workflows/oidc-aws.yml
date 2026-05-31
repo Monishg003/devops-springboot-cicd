@@ -1,0 +1,55 @@
+name: OIDC AWS Authentication
+
+on:
+  push:
+    branches: [main]
+
+# Required for OIDC
+permissions:
+  id-token: write      # generate OIDC token
+  contents: read       # read repo
+
+jobs:
+
+  deploy-with-oidc:
+    name: Deploy with OIDC (No Stored Keys)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # OIDC — gets temporary AWS credentials automatically
+      # No AWS keys stored in GitHub secrets!
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          # GitHub generates short-lived token
+          # AWS validates it and returns temp credentials
+          # Credentials expire after 15 minutes
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+          echo "✅ OIDC authentication successful"
+          echo "Temporary credentials valid for 15 minutes"
+
+      - name: Upload to S3 using OIDC credentials
+        run: |
+          # Build first
+          echo "app.version=${{ github.sha }}" > version.txt
+
+          # Upload using temporary credentials
+          aws s3 cp version.txt \
+            s3://my-deploy-bucket/releases/${{ github.sha }}/
+
+          echo "✅ File uploaded to S3"
+
+      - name: Credentials expire automatically
+        run: |
+          echo "After this job — credentials are gone"
+          echo "No cleanup needed"
+          echo "No rotation needed"
+          echo "No secret exposed even if repo is compromised"

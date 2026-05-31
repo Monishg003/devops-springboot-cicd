@@ -1,0 +1,269 @@
+name: Enterprise CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  JAVA_VERSION: '17'
+  IMAGE_NAME: devops-app
+  REGISTRY: ghcr.io
+
+jobs:
+
+  # ============================================
+  # Stage 1: Quality Gates
+  # ============================================
+  lint:
+    name: Lint and Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+      - name: Validate
+        run: mvn validate -q
+      - name: Check secrets
+        run: |
+          if grep -rE \
+            "password\s*=\s*['\"][^'\"]{3,}" \
+            src/ --include="*.java" -i 2>/dev/null; then
+            echo "❌ Hardcoded secret detected"
+            exit 1
+          fi
+          echo "✅ No hardcoded secrets"
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    needs: lint
+    outputs:
+      test-result: ${{ steps.tests.outcome }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+      - name: Run tests
+        id: tests
+        run: mvn test -q
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ github.sha }}
+          path: target/surefire-reports/
+          retention-days: 30
+
+  # ============================================
+  # Stage 2: Build
+  # ============================================
+  build:
+    name: Build JAR
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+      - name: Set version
+        id: version
+        run: |
+          VERSION="1.0.${{ github.run_number }}-${{ github.sha }}"
+          echo "value=$VERSION" >> $GITHUB_OUTPUT
+      - name: Build
+        run: mvn clean package -DskipTests -q
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-${{ github.sha }}
+          path: target/*.jar
+          retention-days: 30
+
+  # ============================================
+  # Stage 3: Security
+  # ============================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+      - name: Build JAR
+        run: mvn clean package -DskipTests -q
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          tags: scan-target:latest
+          outputs: type=docker,dest=/tmp/scan-image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          input: /tmp/scan-image.tar
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+
+  # ============================================
+  # Stage 4: Docker Push (main only)
+  # ============================================
+  docker-push:
+    name: Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [build, security]
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+      - name: Build JAR
+        run: mvn clean package -DskipTests -q
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================
+  # Stage 5: Deploy Staging
+  # ============================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: docker-push
+    environment: staging
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to staging
+        run: |
+          echo "Deploying to STAGING"
+          echo "Image: ${{ needs.docker-push.outputs.image-tag }}"
+          echo "Version: ${{ needs.build.outputs.version }}"
+
+          # Real deployment (Day 21):
+          # ssh ubuntu@staging-server
+          #   docker pull <image>
+          #   docker compose up -d
+
+          echo "✅ Staging deployment complete"
+
+      - name: Smoke test
+        run: |
+          echo "Running smoke tests on staging..."
+          sleep 2
+          echo "✅ Smoke tests passed"
+
+  # ============================================
+  # Stage 6: Deploy Production
+  # ============================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production    # requires approval!
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to production
+        run: |
+          echo "Deploying to PRODUCTION"
+          echo "Image: ${{ needs.docker-push.outputs.image-tag }}"
+          echo "✅ Production deployment complete"
+
+  # ============================================
+  # Stage 7: Always notify
+  # ============================================
+  notify:
+    name: Pipeline Notification
+    runs-on: ubuntu-latest
+    needs: [lint, test, build, security, docker-push,
+            deploy-staging, deploy-production]
+    if: always()
+
+    steps:
+      - name: Write job summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## Pipeline Results 🚀
+
+          | Stage | Status |
+          |-------|--------|
+          | Lint | ${{ needs.lint.result }} |
+          | Test | ${{ needs.test.result }} |
+          | Build | ${{ needs.build.result }} |
+          | Security | ${{ needs.security.result }} |
+          | Docker Push | ${{ needs.docker-push.result }} |
+          | Deploy Staging | ${{ needs.deploy-staging.result }} |
+          | Deploy Production | ${{ needs.deploy-production.result }} |
+
+          **Triggered by:** ${{ github.actor }}
+          **Commit:** `${{ github.sha }}`
+          EOF
+
+          echo "Pipeline complete — check Actions tab for details"

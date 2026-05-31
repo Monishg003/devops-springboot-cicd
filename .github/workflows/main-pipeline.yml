@@ -1,0 +1,72 @@
+name: Main Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Prevent multiple deploys running at once
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true    # cancel old run if new push arrives
+
+jobs:
+
+  # ---- Call reusable build workflow ----
+  build-staging:
+    name: Build for Staging
+    uses: ./.github/workflows/reusable/build-and-test.yml
+    with:
+      java-version: '17'
+      environment: 'staging'
+      run-integration-tests: false
+    secrets:
+      deploy-token: ${{ secrets.DEPLOY_TOKEN }}
+
+  # ---- Call reusable docker workflow ----
+  docker-staging:
+    name: Docker for Staging
+    needs: build-staging
+    uses: ./.github/workflows/reusable/docker-build.yml
+    with:
+      image-name: 'devops-app'
+      tag: 'staging-${{ github.sha }}'
+      push: false
+      scan: true
+    secrets:
+      registry-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- Use outputs from reusable workflows ----
+  summary:
+    name: Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [build-staging, docker-staging]
+    if: always()
+
+    steps:
+      - name: Show pipeline summary
+        run: |
+          echo "================================================"
+          echo " Pipeline Summary"
+          echo "================================================"
+          echo "JAR built:     ${{ needs.build-staging.outputs.jar-name }}"
+          echo "Version:       ${{ needs.build-staging.outputs.build-version }}"
+          echo "Test status:   ${{ needs.build-staging.outputs.test-status }}"
+          echo "Docker image:  ${{ needs.docker-staging.outputs.image-tag }}"
+          echo "Scan result:   ${{ needs.docker-staging.outputs.scan-result }}"
+          echo "Triggered by:  ${{ github.actor }}"
+          echo "Commit:        ${{ github.sha }}"
+          echo "================================================"
+
+          # Write to GitHub Job Summary (visible in Actions UI)
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Pipeline Summary 🚀
+          | Item | Value |
+          |------|-------|
+          | Environment | staging |
+          | Version | ${{ needs.build-staging.outputs.build-version }} |
+          | Tests | ${{ needs.build-staging.outputs.test-status }} |
+          | Actor | ${{ github.actor }} |
+          | Commit | \`${{ github.sha }}\` |
+          EOF

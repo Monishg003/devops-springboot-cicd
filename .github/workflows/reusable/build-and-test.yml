@@ -1,0 +1,117 @@
+name: Reusable — Build and Test
+
+# This is what makes it reusable
+on:
+  workflow_call:              # called by other workflows
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        required: false
+        type: string
+        default: '17'
+      run-integration-tests:
+        description: 'Run integration tests'
+        required: false
+        type: boolean
+        default: false
+      environment:
+        description: 'Target environment'
+        required: true
+        type: string
+
+    secrets:
+      deploy-token:
+        description: 'Token for deployment'
+        required: false
+
+    # What this workflow passes back to caller
+    outputs:
+      jar-name:
+        description: 'Name of the built JAR'
+        value: ${{ jobs.build.outputs.jar-name }}
+      build-version:
+        description: 'Build version with commit SHA'
+        value: ${{ jobs.build.outputs.build-version }}
+      test-status:
+        description: 'Whether tests passed'
+        value: ${{ jobs.test.outputs.status }}
+
+jobs:
+
+  test:
+    name: Test (Java ${{ inputs.java-version }})
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.run-tests.outcome }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run unit tests
+        id: run-tests
+        run: |
+          echo "Running tests for ${{ inputs.environment }}..."
+          mvn test -q
+          echo "✅ Tests passed"
+
+      - name: Run integration tests
+        if: inputs.run-integration-tests == true
+        run: |
+          echo "Running integration tests..."
+          mvn verify -DskipUnitTests -q || true
+          echo "✅ Integration tests complete"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ inputs.environment }}
+          path: target/surefire-reports/
+          retention-days: 7
+
+  build:
+    name: Build JAR
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      jar-name: ${{ steps.jar-info.outputs.name }}
+      build-version: ${{ steps.jar-info.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build JAR
+        run: mvn clean package -DskipTests -q
+
+      - name: Get JAR info
+        id: jar-info
+        run: |
+          JAR=$(ls target/*.jar | head -1 | xargs basename)
+          VERSION="${{ github.sha }}-${{ inputs.environment }}"
+          echo "name=$JAR" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "JAR: $JAR"
+          echo "Version: $VERSION"
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-${{ inputs.environment }}-${{ github.sha }}
+          path: target/*.jar
+          retention-days: 30
