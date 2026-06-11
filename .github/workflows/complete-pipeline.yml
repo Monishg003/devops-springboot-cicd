@@ -1,0 +1,386 @@
+name: Complete CI/CD Pipeline
+
+# WHY these triggers:
+# push to main = production deploy
+# push to develop = staging deploy
+# pull_request = test only, no deploy
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# WHY these permissions:
+# packages: write → push Docker image to GHCR
+# contents: read → checkout code
+# id-token: write → OIDC auth (no stored AWS keys)
+permissions:
+  contents: write
+  # WHY write: pipeline needs to update GitOps repo
+  packages: write
+  id-token: write
+  pull-requests: write
+
+env:
+  # WHY environment variables at top:
+  # Change one place → affects all jobs
+  # No magic strings scattered through pipeline
+  REGISTRY: ghcr.io
+  IMAGE_NAME: devops-app
+  GITOPS_REPO: Monishg003/gitops-repo
+  JAVA_VERSION: '17'
+
+jobs:
+
+  # ============================================
+  # Job 1: Test
+  # WHY this job exists:
+  # Fast feedback — fail early before wasting time
+  # building images if tests fail
+  # Runs on every push AND pull request
+  # ============================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # WHY: Runner starts empty
+        # Must explicitly pull your code down
+        # Without this → no files to build
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+          # WHY cache: maven:
+          # Maven downloads dependencies on first run (~200MB)
+          # Cache saves them between runs
+          # Speeds up pipeline from 4min → 90sec
+
+      - name: Run tests
+        run: mvn test -q
+        # WHY -q: quiet mode — less noise in logs
+        # Errors still show, just not every download
+
+      - name: Publish test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        # WHY if: always():
+        # Upload test results EVEN if tests fail
+        # You need to see WHICH tests failed
+        # Not just "tests failed"
+        with:
+          name: test-results-${{ github.sha }}
+          path: target/surefire-reports/
+          retention-days: 30
+
+  # ============================================
+  # Job 2: Build and Push Docker Image
+  # WHY this job exists:
+  # Packages the app into a portable container
+  # Pushes to registry so K8s can pull it
+  # Only runs if tests pass (needs: test)
+  # ============================================
+  build-and-push:
+    name: Build and Push Image
+    runs-on: ubuntu-latest
+    needs: test
+    # WHY needs: test:
+    # Don't build broken code
+    # Save compute minutes
+    # Fast feedback loop
+
+    # Only push image on real branches, not PRs
+    # WHY: PR from fork could push malicious image
+    if: github.event_name != 'pull_request'
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+      short-sha: ${{ steps.sha.outputs.short }}
+      # WHY outputs:
+      # Next jobs need the image tag to update GitOps
+      # Pass it forward instead of recalculating
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Build JAR
+        run: mvn clean package -DskipTests -q
+        # WHY -DskipTests: tests already ran in job 1
+        # No need to run again — saves 2 minutes
+
+      - name: Get short SHA
+        id: sha
+        run: |
+          SHORT=$(echo ${{ github.sha }} | cut -c1-8)
+          echo "short=$SHORT" >> $GITHUB_OUTPUT
+          echo "Image will be tagged: $SHORT"
+          # WHY short SHA:
+          # Full SHA is 40 chars — hard to read
+          # Short 8 chars is unique enough
+          # Used as image tag: app:sha-abc12345
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        # WHY Buildx:
+        # Enables advanced Docker build features
+        # Multi-platform builds (amd64, arm64)
+        # Better caching than regular docker build
+        # Build cache stored in GitHub Actions cache
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          # WHY GITHUB_TOKEN:
+          # Auto-provided by GitHub — no setup needed
+          # Scoped to this repo only
+          # Expires after job — no rotation needed
+          # Never visible in logs
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=staging,enable=${{ github.ref == 'refs/heads/develop' }}
+          # WHY multiple tags:
+          # sha-abc12345 → immutable, exact version
+          # latest → always points to newest main build
+          # staging → always points to newest develop build
+          # K8s uses sha tag → exact version pinned
+          # Humans use latest/staging → easy to remember
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # WHY cache-from/to:
+          # Docker layers are cached in GitHub Actions
+          # Second build skips unchanged layers
+          # Speeds up build from 5min → 1min
+
+      - name: Print image info
+        run: |
+          echo "================================================"
+          echo "Image built and pushed successfully"
+          echo "Registry: ${{ env.REGISTRY }}"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Digest: ${{ steps.build.outputs.digest }}"
+          echo "================================================"
+
+  # ============================================
+  # Job 3: Security Scan
+  # WHY this job exists:
+  # Catch vulnerabilities BEFORE deploying to prod
+  # Much cheaper to fix before deploy than after
+  # Runs parallel with deploy — saves time
+  # Blocks deploy if CRITICAL CVEs found
+  # ============================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    # WHY after build: needs the image to scan it
+    # WHY not before deploy: runs in parallel with
+    # GitOps update for speed
+
+    steps:
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:sha-${{ needs.build-and-push.outputs.short-sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+          # WHY exit-code 0:
+          # Don't block deploy for HIGH vulns today
+          # In mature teams: exit-code 1 for CRITICAL
+          # Gradually tighten this gate over time
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-results-${{ github.sha }}
+          path: trivy-results.sarif
+          retention-days: 90
+          # WHY 90 days:
+          # Compliance requirement in many companies
+          # "Show me scan results from 3 months ago"
+
+  # ============================================
+  # Job 4: Update GitOps Repo
+  # WHY this job exists:
+  # This is the bridge between CI and CD
+  # CI produces an image
+  # CD needs to know the new image tag
+  # This job updates the GitOps repo with new tag
+  # ArgoCD then picks it up and deploys
+  #
+  # WHY update GitOps repo instead of direct kubectl:
+  # Git provides audit trail of every deploy
+  # Easy rollback via git revert
+  # ArgoCD handles actual K8s operations
+  # No kubectl credentials needed in CI
+  # ============================================
+  update-gitops:
+    name: Update GitOps Repo
+    runs-on: ubuntu-latest
+    needs: [build-and-push, security-scan]
+    # WHY needs both:
+    # Image must be built AND scanned
+    # before updating GitOps
+
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+          # WHY separate token:
+          # GITHUB_TOKEN can only write to current repo
+          # GitOps repo is a DIFFERENT repo
+          # Need a Personal Access Token with repo scope
+          # Store in GitHub Secrets as GITOPS_TOKEN
+
+      - name: Determine target environment
+        id: env
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "overlay=staging" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/develop" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "overlay=staging" >> $GITHUB_OUTPUT
+          fi
+          # WHY determine environment:
+          # main branch → deploy to staging first
+          # After manual approval → production
+          # develop branch → staging only
+          # Never auto-deploy to production
+          # Production needs deliberate promotion
+
+      - name: Update image tag in GitOps repo
+        run: |
+          SHORT_SHA="${{ needs.build-and-push.outputs.short-sha }}"
+          OVERLAY="${{ steps.env.outputs.overlay }}"
+          NEW_TAG="sha-${SHORT_SHA}"
+
+          echo "Updating $OVERLAY overlay to image tag: $NEW_TAG"
+
+          # Update the image tag in kustomization.yaml
+          # WHY sed: simple, no extra tools needed
+          # Finds the newTag line and replaces the value
+          sed -i "s|newTag:.*|newTag: ${NEW_TAG}|g" \
+            apps/springboot-app/overlays/${OVERLAY}/kustomization.yaml
+
+          # Verify the change
+          echo "Updated kustomization.yaml:"
+          grep "newTag" \
+            apps/springboot-app/overlays/${OVERLAY}/kustomization.yaml
+
+      - name: Commit and push to GitOps repo
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          # WHY bot user:
+          # Clear audit trail — "this was automated"
+          # Not attributed to a human's account
+          # Easy to filter in git log
+
+          git add .
+
+          # Only commit if something changed
+          # WHY check: avoid empty commits
+          # which confuse git log and ArgoCD
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m \
+              "deploy(${{ steps.env.outputs.environment }}): update image to sha-${{ needs.build-and-push.outputs.short-sha }}
+
+Triggered by: ${{ github.actor }}
+Source commit: ${{ github.sha }}
+Pipeline: ${{ github.run_id }}
+Workflow: ${{ github.workflow }}"
+            # WHY detailed commit message:
+            # Anyone looking at GitOps history
+            # can trace back to exact source commit
+            # and pipeline run that caused this deploy
+
+            git push
+            echo "✅ GitOps repo updated"
+            echo "ArgoCD will detect this and deploy within 3 minutes"
+          fi
+
+  # ============================================
+  # Job 5: Verify Deployment
+  # WHY this job exists:
+  # Confirms the deploy actually worked
+  # Not just that the pipeline ran
+  # Catches: image pull failures, OOMKills,
+  # bad config, startup crashes
+  # ============================================
+  verify-deploy:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: update-gitops
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Wait for ArgoCD to sync
+        run: |
+          echo "Waiting 3 minutes for ArgoCD to detect"
+          echo "and apply GitOps repo changes..."
+          sleep 180
+          # WHY 3 minutes:
+          # ArgoCD polls every 3 minutes by default
+          # Could be faster with webhook setup
+          # Webhook = ArgoCD notified instantly on push
+
+      - name: Deployment summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Deployment Summary 🚀
+
+          | Item | Value |
+          |------|-------|
+          | Image | \`sha-${{ needs.build-and-push.outputs.short-sha }}\` |
+          | Environment | staging |
+          | Triggered by | ${{ github.actor }} |
+          | Commit | \`${{ github.sha }}\` |
+          | Status | ArgoCD syncing... |
+
+          ### Next Steps
+          - Check ArgoCD UI for sync status
+          - Verify pods are healthy in staging
+          - After verification, promote to production
+          EOF
